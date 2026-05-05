@@ -14,8 +14,9 @@ class Foreman::CLI < Thor
 
   map ["-v", "--version"] => :version
 
-  class_option :procfile, :type => :string, :aliases => "-f", :desc => "Default: Procfile"
-  class_option :root,     :type => :string, :aliases => "-d", :desc => "Default: Procfile directory"
+  class_option :procfile,    :type => :string, :aliases => "-f", :desc => "Default: Procfile"
+  class_option :socketfile, :type => :string, :aliases => "-s", :desc => "Default: Socketfile"
+  class_option :root,       :type => :string, :aliases => "-d", :desc => "Default: Procfile directory"
 
   desc "start [PROCESS]", "Start the application (or a specific PROCESS)"
 
@@ -42,6 +43,8 @@ class Foreman::CLI < Thor
     check_procfile!
     load_environment!
     engine.load_procfile(procfile)
+    engine.load_socketfile(socketfile)
+    engine.bind_sockets
     engine.options[:formation] = "#{process}=1" if process
     engine.start
   rescue Foreman::Procfile::EmptyFileError
@@ -166,6 +169,14 @@ private ######################################################################
       when options[:procfile] then options[:procfile]
       when options[:root]     then File.expand_path(File.join(options[:root], "Procfile"))
       else "Procfile"
+    end
+  end
+
+  def socketfile
+    case
+      when options[:socketfile] then options[:socketfile]
+      when options[:root]       then File.expand_path(File.join(options[:root], "Socketfile"))
+      else "Socketfile"
     end
   end
 end

@@ -2,6 +2,9 @@ require "foreman"
 require "foreman/env"
 require "foreman/process"
 require "foreman/procfile"
+require "foreman/socketfile"
+require "socket"
+require "fcntl"
 require "tempfile"
 require "fileutils"
 require "thread"
@@ -37,6 +40,8 @@ class Foreman::Engine
     @running   = {}
     @readers   = {}
     @shutdown  = false
+    @socketfile = nil
+    @bound_sockets = {}  # process_name => [{ name:, socket: }]
 
     # Self-pipe for deferred signal-handling (ala djb: http://cr.yp.to/docs/selfpipe.html)
     reader, writer       = create_pipe
@@ -179,6 +184,40 @@ class Foreman::Engine
   def load_env(filename)
     Foreman::Env.new(filename).entries do |name, value|
       @env[name] = value
+    end
+  end
+
+  # Load a Socketfile and bind all declared sockets
+  #
+  # @param [String] filename  A Socketfile to load
+  #
+  def load_socketfile(filename)
+    @socketfile = Foreman::Socketfile.new(filename)
+  end
+
+  # Bind all sockets declared in the Socketfile.
+  # Must be called after load_procfile so process names are known.
+  #
+  def bind_sockets
+    return unless @socketfile&.any?
+
+    @names.each_value do |name|
+      specs = @socketfile.sockets_for(name)
+      next if specs.empty?
+
+      @bound_sockets[name] = specs.map do |spec|
+        sock = Socket.new(:INET6, :STREAM)
+        sock.setsockopt(:SOCKET, :REUSEADDR, true)
+        sock.setsockopt(:IPV6, :V6ONLY, false)
+        addr = Socket.pack_sockaddr_in(spec[:port], spec[:host])
+        sock.bind(addr)
+        sock.listen(128)
+        # Clear O_NONBLOCK to match the systemd socket activation
+        # protocol, which passes blocking sockets.
+        flags = sock.fcntl(Fcntl::F_GETFL, 0)
+        sock.fcntl(Fcntl::F_SETFL, flags & ~Fcntl::O_NONBLOCK)
+        { name: spec[:name], socket: sock }
+      end
     end
   end
 
@@ -364,10 +403,24 @@ private
       1.upto(formation[@names[process]]) do |n|
         reader, writer = create_pipe
         begin
-          pid = process.run(:output => writer, :env => {
-            "PORT" => port_for(process, n).to_s,
-            "PS" => name_for_index(process, n)
-          })
+          spawn_opts = {
+            :output => writer,
+            :env => {
+              "PORT" => port_for(process, n).to_s,
+              "PS" => name_for_index(process, n)
+            }
+          }
+
+          # Pass bound sockets via LISTEN_FDS protocol
+          name = @names[process]
+          if (sockets = @bound_sockets[name]) && !sockets.empty?
+            spawn_opts[:env]["LISTEN_FDS"] = sockets.length.to_s
+            fd_names = sockets.map { |s| s[:name] || "" }.join(":")
+            spawn_opts[:env]["LISTEN_FDNAMES"] = fd_names unless fd_names.empty?
+            spawn_opts[:sockets] = sockets.map { |s| s[:socket] }
+          end
+
+          pid = process.run(spawn_opts)
           writer.puts "started with pid #{pid}"
         rescue Errno::ENOENT
           writer.puts "unknown command: #{process.command}"

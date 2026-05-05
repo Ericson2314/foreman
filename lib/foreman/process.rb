@@ -49,9 +49,18 @@ class Foreman::Process
     env    = @options[:env].merge(options[:env] || {})
     output = options[:output] || $stdout
     runner = "#{Foreman.runner}".shellescape
-    
+
+    spawn_options = { :out => output, :err => output }
+
+    # Map passed sockets to fd 3, 4, 5, ... for LISTEN_FDS protocol
+    if (sockets = options[:sockets])
+      sockets.each_with_index do |sock, i|
+        spawn_options[3 + i] = sock
+      end
+    end
+
     Dir.chdir(cwd) do
-      Process.spawn env, expanded_command(env), :out => output, :err => output
+      Process.spawn env, expanded_command(env), spawn_options
     end
   end
 
