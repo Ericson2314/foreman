@@ -206,17 +206,12 @@ class Foreman::Engine
       next if specs.empty?
 
       @bound_sockets[name] = specs.map do |spec|
-        sock = Socket.new(:INET6, :STREAM)
-        sock.setsockopt(:SOCKET, :REUSEADDR, true)
-        sock.setsockopt(:IPV6, :V6ONLY, false)
-        addr = Socket.pack_sockaddr_in(spec[:port], spec[:host])
-        sock.bind(addr)
-        sock.listen(128)
+        sock = bind_one_socket(spec)
         # Clear O_NONBLOCK to match the systemd socket activation
         # protocol, which passes blocking sockets.
         flags = sock.fcntl(Fcntl::F_GETFL, 0)
         sock.fcntl(Fcntl::F_SETFL, flags & ~Fcntl::O_NONBLOCK)
-        { name: spec[:name], socket: sock }
+        { name: spec[:name], socket: sock, path: spec[:path] }
       end
     end
   end
@@ -329,6 +324,30 @@ class Foreman::Engine
   end
 
 private
+
+  def bind_one_socket(spec)
+    case spec[:type]
+    when :tcp
+      sock = Socket.new(:INET6, :STREAM)
+      sock.setsockopt(:SOCKET, :REUSEADDR, true)
+      sock.setsockopt(:IPV6, :V6ONLY, false)
+      addr = Socket.pack_sockaddr_in(spec[:port], spec[:host])
+      sock.bind(addr)
+      sock.listen(128)
+      sock
+    when :unix
+      path = spec[:path]
+      File.delete(path) if File.exist?(path)
+      sock = Socket.new(:UNIX, :STREAM)
+      sock.bind(Socket.pack_sockaddr_un(path))
+      sock.listen(128)
+      # 0660: group-rw, no world access
+      File.chmod(0660, path)
+      sock
+    else
+      raise "unknown socket type: #{spec[:type]}"
+    end
+  end
 
 ### Engine API ######################################################
 
@@ -543,5 +562,16 @@ private
     # Ok, we have no other option than to kill all of our children
     system  "sending SIGKILL to all processes"
     kill_children "SIGKILL"
+  ensure
+    cleanup_unix_sockets
+  end
+
+  def cleanup_unix_sockets
+    @bound_sockets.each_value do |sockets|
+      sockets.each do |s|
+        path = s[:path]
+        File.delete(path) if path && File.exist?(path)
+      end
+    end
   end
 end
